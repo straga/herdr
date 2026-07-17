@@ -10,50 +10,98 @@ Branches:
 
 ## What's different from upstream
 
-In the agents panel, grouped mode (`agent_panel_sort = "spaces"`), a thin `─` is drawn
+In the agents panel, in grouped mode, a thin `─` is drawn
 where one workspace's agents end and the next workspace's begin. Without it the panel is a
 flat list and group boundaries are invisible. Everything else is identical to upstream.
 
-## Requirements (Apple Silicon macOS)
-
-- macOS 14+, Apple Silicon (arm64). Intel is not covered — the build is arm64.
-- **Rust 1.96.1** — pinned by `rust-toolchain.toml`, rustup pulls it automatically.
-- **zig 0.15.2** — needed to build the vendored `libghostty-vt`:
-  ```sh
-  brew install zig@0.15
-  ```
-  If you already have zig 0.16+, it may fail: zig breaks `build.zig` between minor
-  versions, and the vendored lib pins `minimum_zig_version = 0.15.2`.
-
 ## Build
 
+Upstream builds on **Linux and macOS** (both x86_64 and aarch64); native Windows is
+preview-only beta upstream — our patch is plain Rust UI code and platform-neutral, so it
+follows whatever upstream supports.
+
+Common to every platform:
+- **Rust 1.96.1** — pinned by `rust-toolchain.toml`, rustup pulls it automatically.
+- **zig 0.15.2** — builds the vendored `libghostty-vt` (`build.rs` calls it).
+  zig breaks `build.zig` between minor versions and the vendored lib pins
+  `minimum_zig_version = 0.15.2`, so **0.16+ will not do**.
+
+### Nix (any platform)
+
+The repo ships a flake — no toolchain setup needed:
+
 ```sh
+nix build github:straga/herdr/hurt     # binary at ./result/bin/herdr
+nix run   github:straga/herdr/hurt
+```
+
+### macOS
+
+```sh
+brew install zig@0.15 cmake ninja
 git clone https://github.com/straga/herdr && cd herdr
 cargo build --release
 ```
 
-Takes ~1 minute; `build.rs` compiles `libghostty-vt` via zig, then links it in.
-Result: `target/release/herdr` — a self-contained binary (only system frameworks, no
-external libs to ship).
+### Linux
+
+Build tools mirror what upstream CI installs:
+
+```sh
+sudo apt-get update
+sudo apt-get install -y cmake ninja-build musl-tools
+# zig 0.15.2 — from your package manager, or https://ziglang.org/download/
+
+git clone https://github.com/straga/herdr && cd herdr
+cargo build --release
+```
+
+Upstream ships Linux binaries built against **musl** (statically linked). To match that:
+
+```sh
+rustup target add x86_64-unknown-linux-musl
+cargo build --release --locked --target x86_64-unknown-linux-musl
+```
+
+For an aarch64 (musl) build you also need the cross toolchain and its linker:
+
+```sh
+sudo apt-get install -y gcc-aarch64-linux-gnu crossbuild-essential-arm64
+export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc
+cargo build --release --locked --target aarch64-unknown-linux-musl
+```
+
+Takes ~1 minute; `build.rs` compiles `libghostty-vt` via zig and links it in. Result:
+`target/release/herdr` (or `target/<triple>/release/herdr`) — self-contained, nothing extra
+to ship alongside.
+
+**If a build fails after switching zig versions or targets**, clear the zig caches (CI does
+this on every run):
+
+```sh
+rm -rf .zig-cache vendor/libghostty-vt/.zig-cache vendor/libghostty-vt/zig-out
+```
 
 ## Install
 
-Put it on your PATH. `~/.local/bin` normally comes **before** `/opt/homebrew/bin`, so this
-also overrides a brew-installed herdr if you have one:
+Put it on your PATH — e.g. `~/.local/bin`:
 
 ```sh
 mkdir -p ~/.local/bin
 ln -sf "$PWD/target/release/herdr" ~/.local/bin/herdr
 hash -r
-which herdr        # expect ~/.local/bin/herdr, not /opt/homebrew/bin/herdr
+which herdr        # must point at ~/.local/bin/herdr
 ```
+
+If `which` still shows another herdr (e.g. a package-managed one), your PATH prefers that
+directory — put `~/.local/bin` ahead of it in your shell rc, or install elsewhere.
 
 A symlink (not a copy) keeps pointing at the build output — after a later
 `cargo build --release` you get the new binary with no extra steps.
 
 Revert at any time: `rm ~/.local/bin/herdr`.
 
-## ⚠ If you already have herdr from brew
+## ⚠ If you already have herdr from brew (macOS)
 
 Brew installs a **LaunchAgent** that starts its own server and, with `KeepAlive`, restarts
 it whenever it dies. Your fork client will just attach to that already-running **brew**
@@ -73,20 +121,15 @@ The brew binary stays on disk as a fallback; only its autostart is gone.
 
 ## Config
 
-`~/.config/herdr/config.toml` is optional — the fork works with no config at all.
+`~/.config/herdr/config.toml` is optional — **the fork needs no config at all** for the
+separator to work.
 
-Relevant to this patch:
+The separator is drawn in **grouped** mode, which is already the default
+(`agent_panel_sort` defaults to `spaces`). Nothing to set up.
 
-```toml
-agent_panel_sort = "spaces"   # grouped mode; the separator is drawn only here
-```
-
-In `priority` mode there is deliberately no separator: groups interleave by attention
-there, so a boundary would be meaningless.
-
-**Don't copy our config blindly.** Some of it is specific to our herd tooling and will only
-get in your way — e.g. `[session] resume_agents_on_restore = false`, which stops herdr from
-restoring agents after a server restart (we relaunch them ourselves with our own markup).
+If you flip the panel to **priority** (the toggle in the agents panel header), the
+separator disappears — by design: groups interleave by attention there, so a boundary
+would be meaningless.
 
 ## Update
 
