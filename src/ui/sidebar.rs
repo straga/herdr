@@ -3221,6 +3221,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             terminal_title: None,
             terminal_title_stripped: None,
             agent_label: None,
+            agent_kind_label: None,
             agent: None,
             state: AgentState::Unknown,
             seen: true,
