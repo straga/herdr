@@ -1,7 +1,8 @@
 # herdr — hurt fork
 
-A fork of [ogulcancelik/herdr](https://github.com/ogulcancelik/herdr) with one addition: a
-separator line between agent groups in the sidebar.
+A fork of [ogulcancelik/herdr](https://github.com/ogulcancelik/herdr) with two changes to the
+agents sidebar: agents are grouped by workspace identity, and a separator line is drawn between
+those groups.
 
 Branches:
 
@@ -11,9 +12,10 @@ Branches:
 
 ## What's different from upstream
 
-In the agents panel, in grouped mode, a thin `─` is drawn where one workspace's agents end
-and the next workspace's begin. Without it the panel is one flat list and you cannot see
-where a group stops. Nothing else is changed.
+In the agents panel, in grouped mode, agents are grouped by the identity of their workspace
+rather than by worktree-space alone, so each ungrouped workspace forms its own group. A thin `─`
+is then drawn where one group ends and the next begins. Without it the panel is one flat list and
+you cannot see where a group stops. Nothing else is changed.
 
 ## Build
 
@@ -27,6 +29,11 @@ Two things are needed everywhere:
 - zig 0.15.2, which builds the vendored `libghostty-vt` (`build.rs` calls it). zig breaks
   `build.zig` between minor versions and the vendored library requires
   `minimum_zig_version = 0.15.2`, so 0.16+ will not work.
+
+`cmake` and `ninja` belong to that vendored build, not to the Rust one. A tree whose
+`vendor/libghostty-vt/.zig-cache` is already populated links the cached library and never calls
+them: a release build on 2026-08-21 finished in 45s on a machine with neither installed. Install
+them before the first build, or after clearing the zig caches.
 
 ### Nix (any platform)
 
@@ -137,10 +144,20 @@ interleave by attention there, so a boundary would mean nothing.
 
 ## Update
 
+Our commits are replayed on top of an upstream release, so `hurt` stays a short, readable
+series of our own changes rather than a chain of merges:
+
 ```sh
-git pull                   # hurt = current upstream plus our patch
-cargo build --release      # the symlink already points here
+git fetch upstream --tags
+git branch hurt-pre-<version>-<date> hurt   # insurance; a rebase is not undone by itself
+git rebase <tag>                            # e.g. v0.8.2
+cargo build --release                       # the symlink already points here
 ```
 
-We keep `master` in sync with upstream and merge it into `hurt`, so `git pull` on `hurt`
-brings you both.
+Target a release tag rather than `upstream/master`: a tag is reproducible, so a measurement taken
+on it can be repeated. Verify afterwards that the patch survived — `git diff --stat <tag>..HEAD`
+must still show the same files, and the separator has to be checked by eye in a live sidebar,
+because it is UI and no build proves it renders.
+
+A rebuilt binary changes nothing until the herdr **server** is restarted: the running server
+keeps the old one in memory. `herdr server reload-config` reloads config, not the binary.
