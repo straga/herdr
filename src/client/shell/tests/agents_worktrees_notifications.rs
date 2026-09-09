@@ -1462,3 +1462,157 @@ fn semantic_notifications_use_client_policy_and_stable_navigation_targets() {
     assert!(state.visible_notification.is_none());
     assert_eq!(state.pending_notifications.len(), 1);
 }
+
+/// Number of full-width rules drawn in a frame whose agents sit in the given workspaces.
+///
+/// Two workspaces always exist; only where the agents live changes. That keeps everything
+/// but the group boundary identical between two frames, so the difference between two
+/// counts is the boundary and nothing else.
+///
+/// The count is never asserted absolutely. The agent panel header draws a rule of its own,
+/// and a test pinned to a total would fail the day someone adds a section divider — for a
+/// reason that has nothing to do with grouping.
+fn sidebar_rule_rows(
+    agent_workspaces: &[&str],
+    sort: crate::config::AgentPanelSortConfig,
+    row_gap: u16,
+) -> usize {
+    let mut projected = snapshot();
+
+    let mut second_workspace = projected.workspaces[0].clone();
+    second_workspace.workspace_id = "ws_2".into();
+    second_workspace.active_tab_id = "tab_2".into();
+    second_workspace.number = 2;
+    second_workspace.label = "second-space".into();
+    second_workspace.focused = false;
+    projected.workspaces.push(second_workspace);
+
+    let mut second_tab = projected.tabs[0].clone();
+    second_tab.tab_id = "tab_2".into();
+    second_tab.workspace_id = "ws_2".into();
+    second_tab.number = 2;
+    second_tab.focused = false;
+    projected.tabs.push(second_tab);
+
+    projected.panes.clear();
+    projected.agents.clear();
+    for (index, workspace_id) in agent_workspaces.iter().enumerate() {
+        let pane_id = format!("pane_{}", index + 1);
+        let tab_id = if *workspace_id == "ws_2" { "tab_2" } else { "tab_1" };
+        let mut pane = snapshot().panes[0].clone();
+        pane.pane_id = pane_id.clone();
+        pane.workspace_id = (*workspace_id).into();
+        pane.tab_id = tab_id.into();
+        pane.focused = index == 0;
+        projected.panes.push(pane);
+        projected.agents.push(ClientShellAgent {
+            pane_id,
+            workspace_id: (*workspace_id).into(),
+            tab_id: tab_id.into(),
+            name: Some(format!("agent {}", index + 1)),
+            display_agent: None,
+            agent: Some("pi".into()),
+            title: None,
+            terminal_title: None,
+            terminal_title_stripped: None,
+            agent_status: AgentStatus::Idle,
+            state_change_seq: 10 + index as u64,
+            state_labels: Vec::new(),
+            tokens: Vec::new(),
+            focused: index == 0,
+        });
+    }
+
+    let mut config = Config::default();
+    config.ui.agent_panel_sort = sort;
+    config.ui.sidebar.agents.row_gap = row_gap;
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    state.set_snapshot(Box::new(projected));
+    state.set_pane_surface(surface());
+
+    let frame = state.compose(106, 30).expect("sidebar frame");
+    frame
+        .cells
+        .chunks(frame.width as usize)
+        .filter(|row| {
+            row.iter()
+                .map(|cell| cell.symbol.as_str())
+                .collect::<String>()
+                .contains(&"─".repeat(10))
+        })
+        .count()
+}
+
+#[test]
+fn agent_groups_are_fenced_where_the_workspace_changes() {
+    let two_spaces = sidebar_rule_rows(
+        &["ws_1", "ws_2"],
+        crate::config::AgentPanelSortConfig::Spaces,
+        0,
+    );
+    let one_space = sidebar_rule_rows(
+        &["ws_1", "ws_1"],
+        crate::config::AgentPanelSortConfig::Spaces,
+        0,
+    );
+    assert_eq!(
+        two_spaces,
+        one_space + 1,
+        "agents from two workspaces must be separated by exactly one extra rule \
+         (two spaces: {two_spaces}, one space: {one_space})"
+    );
+}
+
+#[test]
+fn agents_of_one_workspace_are_not_fenced_from_each_other() {
+    let three_in_one = sidebar_rule_rows(
+        &["ws_1", "ws_1", "ws_1"],
+        crate::config::AgentPanelSortConfig::Spaces,
+        0,
+    );
+    let single = sidebar_rule_rows(&["ws_1"], crate::config::AgentPanelSortConfig::Spaces, 0);
+    assert_eq!(
+        three_in_one, single,
+        "panes of one workspace must stay in one group \
+         (three agents: {three_in_one}, one agent: {single})"
+    );
+}
+
+#[test]
+fn priority_order_draws_no_group_rules() {
+    let two_spaces = sidebar_rule_rows(
+        &["ws_1", "ws_2"],
+        crate::config::AgentPanelSortConfig::Priority,
+        0,
+    );
+    let one_space = sidebar_rule_rows(
+        &["ws_1", "ws_1"],
+        crate::config::AgentPanelSortConfig::Priority,
+        0,
+    );
+    assert_eq!(
+        two_spaces, one_space,
+        "priority order interleaves workspaces, so a boundary there would fence \
+         nothing (two spaces: {two_spaces}, one space: {one_space})"
+    );
+}
+
+#[test]
+fn a_group_boundary_survives_a_row_gap_that_spaces_every_entry() {
+    let two_spaces = sidebar_rule_rows(
+        &["ws_1", "ws_2"],
+        crate::config::AgentPanelSortConfig::Spaces,
+        1,
+    );
+    let one_space = sidebar_rule_rows(
+        &["ws_1", "ws_1"],
+        crate::config::AgentPanelSortConfig::Spaces,
+        1,
+    );
+    assert_eq!(
+        two_spaces,
+        one_space + 1,
+        "with row_gap = 1 every entry is already spaced, so a blank line cannot be the \
+         boundary — the rule has to be (two spaces: {two_spaces}, one space: {one_space})"
+    );
+}
