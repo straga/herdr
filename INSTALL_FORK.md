@@ -142,6 +142,42 @@ It is drawn in grouped mode, which is already the default (`agent_panel_sort` de
 `spaces`). If you switch the panel to priority, the separator goes away on purpose: groups
 interleave by attention there, so a boundary would mean nothing.
 
+### Attaching from a second machine
+
+The client renders the shell, so it reads the `config.toml` of the machine it runs on — not the
+one on the machine it attaches to. Theme, palette, sidebar widths, status indicators and the
+agent row layout are all resolved client-side (`ClientShellConfig::from_config`,
+`src/client/shell/config.rs`). The endpoint sends nothing of the sort, with one exception: its
+keybinding profile, and that only when the client asks for server bindings
+(`server_keybindings_toml`, `src/protocol/wire.rs`).
+
+This is deliberate upstream, not an oversight. `AGENTS.md`, section "Runtime/client boundary
+guardrail", puts sidebar layout and token placement on the client and pane/agent metadata on the
+server. Agent metadata therefore travels and custom row tokens do not: the value arrives, the
+slot to print it in does not exist unless this machine's config declares one.
+
+So the second machine starts on defaults and looks nothing like the first. Copy the presentation
+part of your config across and it matches again — these sections:
+
+```toml
+[theme]
+[ui]
+[ui.toast]
+[ui.sidebar.agents]
+```
+
+Leave the rest behind: `[session]` is server-side and means nothing on a client, and any
+`[[keys.command]]` bound to a plugin that machine does not have becomes a dead key.
+
+One more way to reach the same "why does this look wrong" moment: a debug build reads
+`~/.config/herdr-dev/config.toml` while a release build reads `~/.config/herdr/config.toml`
+(`app_dir_name()`, `src/config/io.rs`). `HERDR_CONFIG_PATH` overrides both.
+
+Chrome you change by hand — sidebar width, section split, collapsed state, panel sort, collapsed
+groups — is not in the config at all. It lives next to the config, under the state directory
+(`~/.local/state/herdr/client-shell/local-<hash>.json` on Linux and macOS), keyed by a hash of the
+endpoint socket path — so every endpoint you attach to remembers its own.
+
 ## Update
 
 Our commits are replayed on top of an upstream release, so `hurt` stays a short, readable
