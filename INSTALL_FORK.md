@@ -111,6 +111,32 @@ Use a symlink rather than a copy. It keeps pointing at the build output, so afte
 
 To undo all of this: `rm ~/.local/bin/herdr`.
 
+## macOS keeps asking for permissions
+
+macOS grants folder and automation access to a *signature*, not to a path. An unsigned binary
+is identified by its hash, and the hash changes on every rebuild — so each build looks like a
+new application and the dialogs come back. herdr runs its server detached from the terminal,
+which makes the binary itself the subject of those grants rather than your terminal app.
+
+Give it a stable signature once and the grants survive rebuilds:
+
+```sh
+./scripts/create-cert.sh      # once per machine
+just build                    # builds, then signs
+```
+
+`create-cert.sh` puts a self-signed code-signing certificate in your login keychain. On the
+first signing macOS asks whether `codesign` may use the key — answer "Always Allow", or every
+build stops on that dialog.
+
+If you have an Apple Developer ID, nothing extra is needed: `sign-binary.sh` prefers a
+Developer ID Application certificate when the keychain holds one. `HERDR_SIGN_IDENTITY` picks a
+specific identity, `HERDR_SIGN_IDENTIFIER` pins the identifier macOS keys the grants by — set
+it if you have already answered those dialogs for a binary signed some other way.
+
+Without any certificate the binary is signed ad-hoc and the script says so. That works, the
+dialogs just keep coming back.
+
 ## If you installed herdr from brew (macOS)
 
 Read this one. It costs an hour otherwise.

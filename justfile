@@ -79,10 +79,11 @@ install-hooks:
     chmod +x .githooks/commit-msg
     @echo "installed git hooks from .githooks"
 
-# Build release binary
+# Build the release binary and sign it (macOS: keeps granted permissions across rebuilds)
 [unix]
 build:
     cargo build --release --locked
+    ./scripts/sign-binary.sh
 
 [windows]
 build:
