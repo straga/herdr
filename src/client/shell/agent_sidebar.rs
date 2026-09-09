@@ -12,6 +12,9 @@ use super::*;
 
 pub(super) struct AgentRow {
     pub(super) pane_id: String,
+    /// The workspace this agent lives in. Carried on the row because the panel groups by
+    /// it: the renderer sees rows, not the snapshot they were built from.
+    pub(super) workspace_id: String,
     pub(super) status: crate::api::schema::AgentStatus,
     pub(super) focused: bool,
     pub(super) rows: Vec<Vec<crate::ui::ResolvedToken>>,
@@ -80,6 +83,7 @@ pub(super) fn render_agent_panel(
         agent_scroll,
         hits,
         |row| row.rows.len(),
+        |left, right| left.workspace_id == right.workspace_id,
         |buffer, rect, row, hits| {
             hits.agents.push((rect, row.pane_id.clone()));
             render_agent_row(buffer, rect, row, config);
@@ -160,8 +164,18 @@ pub(super) fn render_agent_list<T>(
     agent_scroll: &mut usize,
     hits: &mut ShellHitMap,
     row_lines: impl Fn(&T) -> usize,
+    same_group: impl Fn(&T, &T) -> bool,
     mut render_row: impl FnMut(&mut Buffer, Rect, &T, &mut ShellHitMap),
 ) {
+    // Grouping is a property of the CALLER's row type, not of this function: the list is
+    // rendered for plain agent rows and for endpoint-qualified ones, and what counts as one
+    // group differs between them. Hence a predicate on a pair of neighbours rather than a
+    // field read here.
+    let group_boundary = |index: usize| {
+        config.agent_panel_sort == crate::config::AgentPanelSortConfig::Spaces
+            && index + 1 < rows.len()
+            && !same_group(&rows[index], &rows[index + 1])
+    };
     let body = Rect::new(
         area.x,
         area.y.saturating_add(3),
@@ -195,7 +209,7 @@ pub(super) fn render_agent_list<T>(
         .enumerate()
         .map(|(index, _)| {
             if index + 1 < rows.len() {
-                config.agents.row_gap
+                config.agents.row_gap + u16::from(group_boundary(index))
             } else {
                 0
             }
@@ -218,13 +232,28 @@ pub(super) fn render_agent_list<T>(
         }
         let rect = Rect::new(body.x, y, content_width, height);
         render_row(buffer, rect, row, hits);
-        y = y
-            .saturating_add(height)
-            .saturating_add(if index + 1 < rows.len() {
-                config.agents.row_gap
-            } else {
-                0
-            });
+        let gap = if index + 1 < rows.len() {
+            config.agents.row_gap + u16::from(group_boundary(index))
+        } else {
+            0
+        };
+        // The rule goes into the row the boundary added, past the ordinary gap. A blank line
+        // cannot carry the boundary: with `row_gap = 1` every entry is spaced already, and
+        // the border would be exactly as visible as the spacing around it.
+        if group_boundary(index) {
+            let rule_y = y.saturating_add(height).saturating_add(config.agents.row_gap);
+            if rule_y < body.bottom() {
+                put_text(
+                    buffer,
+                    body.x,
+                    rule_y,
+                    content_width,
+                    &"─".repeat(content_width as usize),
+                    Style::default().fg(config.palette.surface_dim),
+                );
+            }
+        }
+        y = y.saturating_add(height).saturating_add(gap);
     }
 
     if show_scrollbar {
@@ -312,6 +341,7 @@ pub(super) fn agent_row(
     );
     Some(AgentRow {
         pane_id: agent.pane_id.clone(),
+        workspace_id: agent.workspace_id.clone(),
         status: agent.agent_status,
         focused: agent.focused,
         rows,
