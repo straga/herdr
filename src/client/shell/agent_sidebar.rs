@@ -12,9 +12,15 @@ use super::*;
 
 pub(super) struct AgentRow {
     pub(super) pane_id: String,
-    /// The workspace this agent lives in. Carried on the row because the panel groups by
-    /// it: the renderer sees rows, not the snapshot they were built from.
-    pub(super) workspace_id: String,
+    /// Identity of the group this agent belongs to in the grouped (Spaces) view: the
+    /// worktree-space key when its workspace is a space member, otherwise the workspace id
+    /// itself, so each ungrouped workspace is its own group. Agents of one workspace
+    /// (different tabs or panes) stay together; distinct workspaces are fenced by a rule,
+    /// and so are two workspaces of different spaces — but never two of the same space.
+    ///
+    /// Carried on the row because the renderer sees rows, not the snapshot they were built
+    /// from, and the workspace a row came from is no longer reachable by then.
+    pub(super) group_key: String,
     pub(super) status: crate::api::schema::AgentStatus,
     pub(super) focused: bool,
     pub(super) rows: Vec<Vec<crate::ui::ResolvedToken>>,
@@ -83,7 +89,7 @@ pub(super) fn render_agent_panel(
         agent_scroll,
         hits,
         |row| row.rows.len(),
-        |left, right| left.workspace_id == right.workspace_id,
+        |left, right| left.group_key == right.group_key,
         |buffer, rect, row, hits| {
             hits.agents.push((rect, row.pane_id.clone()));
             render_agent_row(buffer, rect, row, config);
@@ -341,7 +347,11 @@ pub(super) fn agent_row(
     );
     Some(AgentRow {
         pane_id: agent.pane_id.clone(),
-        workspace_id: agent.workspace_id.clone(),
+        group_key: workspace
+            .worktree
+            .as_ref()
+            .map(|worktree| worktree.key.clone())
+            .unwrap_or_else(|| workspace.workspace_id.clone()),
         status: agent.agent_status,
         focused: agent.focused,
         rows,

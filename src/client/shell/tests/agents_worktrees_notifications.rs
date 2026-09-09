@@ -1477,6 +1477,17 @@ fn sidebar_rule_rows(
     sort: crate::config::AgentPanelSortConfig,
     row_gap: u16,
 ) -> usize {
+    sidebar_rule_rows_in_spaces(agent_workspaces, sort, row_gap, &[None, None])
+}
+
+/// As above, but each workspace is placed in the named worktree space (`None` = not a space
+/// member). Two workspaces of one space form one group.
+fn sidebar_rule_rows_in_spaces(
+    agent_workspaces: &[&str],
+    sort: crate::config::AgentPanelSortConfig,
+    row_gap: u16,
+    spaces: &[Option<&str>; 2],
+) -> usize {
     let mut projected = snapshot();
 
     let mut second_workspace = projected.workspaces[0].clone();
@@ -1493,6 +1504,14 @@ fn sidebar_rule_rows(
     second_tab.number = 2;
     second_tab.focused = false;
     projected.tabs.push(second_tab);
+
+    for (workspace, space) in projected.workspaces.iter_mut().zip(spaces.iter()) {
+        workspace.worktree = space.map(|key| ClientShellWorktree {
+            key: key.to_owned(),
+            label: key.to_owned(),
+            is_linked_worktree: true,
+        });
+    }
 
     projected.panes.clear();
     projected.agents.clear();
@@ -1614,5 +1633,30 @@ fn a_group_boundary_survives_a_row_gap_that_spaces_every_entry() {
         one_space + 1,
         "with row_gap = 1 every entry is already spaced, so a blank line cannot be the \
          boundary — the rule has to be (two spaces: {two_spaces}, one space: {one_space})"
+    );
+}
+
+#[test]
+fn two_workspaces_of_one_worktree_space_stay_in_one_group() {
+    // `alpha/main` and `alpha/issue` are two workspaces of one space and are never fenced from
+    // each other. This fork does not exercise that shape in practice, so nothing but this test
+    // stands between the behaviour and a quiet regression.
+    let one_space = sidebar_rule_rows_in_spaces(
+        &["ws_1", "ws_2"],
+        crate::config::AgentPanelSortConfig::Spaces,
+        0,
+        &[Some("alpha"), Some("alpha")],
+    );
+    let two_spaces = sidebar_rule_rows_in_spaces(
+        &["ws_1", "ws_2"],
+        crate::config::AgentPanelSortConfig::Spaces,
+        0,
+        &[Some("alpha"), Some("beta")],
+    );
+    assert_eq!(
+        two_spaces,
+        one_space + 1,
+        "workspaces of one worktree space are one group; only a change of space fences them \
+         (same space: {one_space}, two spaces: {two_spaces})"
     );
 }
