@@ -75,7 +75,7 @@ pub(super) fn render_expanded(
         // workspace alone would merge agents of two different machines into one group.
         |left, right| {
             left.endpoint_id == right.endpoint_id
-                && left.agent.workspace_id == right.agent.workspace_id
+                && left.agent.group_key == right.agent.group_key
         },
         |buffer, rect, row, hits| {
             super::agent_sidebar::render_agent_row(buffer, rect, &row.agent, config);
