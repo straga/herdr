@@ -74,9 +74,10 @@ install-hooks:
     chmod +x .githooks/commit-msg
     @echo "installed git hooks from .githooks"
 
-# Build release binary
+# Build the release binary and sign it (macOS: keeps granted permissions across rebuilds)
 build:
     cargo build --release --locked
+    ./scripts/sign-binary.sh
 
 # Non-gating full-render scaling profile for background workspaces and active panes
 bench-render-scale:
