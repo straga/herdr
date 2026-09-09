@@ -168,6 +168,32 @@ It is drawn in grouped mode, which is already the default (`agent_panel_sort` de
 `spaces`). If you switch the panel to priority, the separator goes away on purpose: groups
 interleave by attention there, so a boundary would mean nothing.
 
+### Your own token in the agent row
+
+The agent row is a list of tokens, and you can add one of your own. It takes two halves, and
+they live in different places — which is the usual way this breaks.
+
+The value comes from outside herdr. Whatever manages your panes reports it:
+
+```sh
+herdr pane report-metadata <pane_id> --source my-tool --token breed=🐑
+```
+
+The slot comes from your config. A token no row declares is never drawn, however faithfully
+the value arrives:
+
+```toml
+[ui.sidebar.agents]
+rows = [["state_icon", "workspace", "tab", "$breed"], ["agent"]]
+```
+
+Metadata is server-side and reaches every client attached to that endpoint. The row layout is
+client-side and lives in the config of the machine you are looking from — so a second machine
+shows the same agents without your token until its own config declares one.
+
+Values are trimmed to 80 characters, and `--ttl-ms` expires a token on its own if the reporter
+should stop having a say.
+
 ### Attaching from a second machine
 
 The client renders the shell, so it reads the `config.toml` of the machine it runs on — not the
