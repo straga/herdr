@@ -26,9 +26,10 @@ wherever upstream does.
 Two things are needed everywhere:
 
 - Rust 1.96.1. Pinned by `rust-toolchain.toml`, rustup installs it for you.
-- zig 0.15.2, which builds the vendored `libghostty-vt` (`build.rs` calls it). zig breaks
-  `build.zig` between minor versions and the vendored library requires
-  `minimum_zig_version = 0.15.2`, so 0.16+ will not work.
+- zig 0.16.0, which builds the vendored `libghostty-vt` (`build.rs` calls it). zig breaks
+  `build.zig` between minor versions, so the version to install is the one the vendored library
+  asks for: `minimum_zig_version` in `vendor/libghostty-vt/build.zig.zon`. Read it there before
+  installing — it moves when the vendored library is updated.
 
 `cmake` and `ninja` belong to that vendored build, not to the Rust one. A tree whose
 `vendor/libghostty-vt/.zig-cache` is already populated links the cached library and never calls
