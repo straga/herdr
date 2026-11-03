@@ -1,17 +1,19 @@
 > ### This is a fork
 >
-> Upstream is [ogulcancelik/herdr](https://github.com/ogulcancelik/herdr). Everything below
-> this box is upstream's own README, untouched.
+> Upstream is [herdrdev/herdr](https://github.com/herdrdev/herdr). Everything below this box is
+> upstream's own README, untouched.
 >
-> **What we changed:** a separator line between agent groups in the sidebar (grouped mode).
-> That is the whole difference.
+> **What we changed:** on top of release v0.9.5, agent groups in the sidebar with a separator line
+> between them; on macOS, a `Herdr Server` app so the server can be granted Local Network access,
+> a server that survives its terminal quitting, and scripts for a stable code signature. The full
+> list is in [INSTALL_FORK.md](INSTALL_FORK.md).
 >
 > **How to build and install it:** see **[INSTALL_FORK.md](INSTALL_FORK.md)**.
 > If you already have herdr from brew, read that file first — its LaunchAgent will keep
 > serving you the brew build and you will wonder why nothing changed.
 >
-> **Branches:** `hurt` (default) is upstream plus our patch. `master` is a clean mirror of
-> upstream, so syncing stays a fast-forward.
+> **Branches:** `hurt` (default) is upstream plus our changes. `master` holds only upstream's
+> commits, so syncing stays a fast-forward.
 
 ---
 
