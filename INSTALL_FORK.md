@@ -328,9 +328,9 @@ git rebase --onto <new-tag> <old-tag> hurt  # e.g. --onto v0.9.6 v0.9.5
 just build                                  # the symlink already points here
 ```
 
-`--onto` matters: upstream puts release tags on release branches, so the old tag is not in the
-history of the new one, and a plain `git rebase <new-tag>` carries upstream's own commits along with
-ours.
+`--onto` matters: upstream cuts some releases on their own branches, so the old tag is not always
+in the history of the new one (v0.9.3 is not in v0.9.4). A plain `git rebase <new-tag>` then carries
+those upstream commits along with ours.
 
 Target a release tag rather than `upstream/master`: a tag is reproducible, so a measurement taken
 on it can be repeated. Verify afterwards that the patch survived — `git diff --stat <tag>..HEAD`
