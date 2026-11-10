@@ -57,6 +57,24 @@ pub(super) fn encode_api_submission_parts(
     (text, runtime.encode_terminal_key(enter.into()))
 }
 
+/// Text written as typed input: no bracketed-paste markers. A carriage return would submit
+/// early, so line ends become line feeds; a leading `/`, `!` or `#` would start a command in a
+/// typed prompt, so it gets a space in front.
+pub(super) fn encode_typed_submission_parts(
+    runtime: &crate::terminal::TerminalRuntime,
+    text: &str,
+) -> (Vec<u8>, Vec<u8>) {
+    let mut text = text.replace("\r\n", "\n").replace('\r', "\n");
+    if text.starts_with(['/', '!', '#']) {
+        text.insert(0, ' ');
+    }
+    let enter = crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Enter,
+        crossterm::event::KeyModifiers::NONE,
+    );
+    (text.into_bytes(), runtime.encode_terminal_key(enter.into()))
+}
+
 pub(super) fn encode_api_submission(
     runtime: &crate::terminal::TerminalRuntime,
     text: &str,

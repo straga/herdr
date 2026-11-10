@@ -113,6 +113,7 @@ fn agent_start_and_prompt_requests_round_trip() {
     let prompt = Request {
         id: "prompt".into(),
         method: Method::AgentPrompt(AgentPromptParams {
+            typed: false,
             target: "reviewer".into(),
             text: "review this".into(),
             wait: None,
@@ -128,6 +129,7 @@ fn agent_start_and_prompt_requests_round_trip() {
     let prompt_and_wait = Request {
         id: "prompt-and-wait".into(),
         method: Method::AgentPrompt(AgentPromptParams {
+            typed: false,
             target: "reviewer".into(),
             text: "review this".into(),
             wait: Some(AgentPromptWaitOptions {

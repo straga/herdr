@@ -777,7 +777,7 @@ fn agent_rename(args: &[String]) -> std::io::Result<i32> {
 fn agent_prompt(args: &[String]) -> std::io::Result<i32> {
     let Some(target) = args.first() else {
         eprintln!(
-            "usage: herdr agent prompt <target> <text> [--wait] [--until STATUS]... [--timeout MS]"
+            "usage: herdr agent prompt <target> <text> [--wait] [--until STATUS]... [--timeout MS] [--typed]"
         );
         return Ok(2);
     };
@@ -786,6 +786,7 @@ fn agent_prompt(args: &[String]) -> std::io::Result<i32> {
         return Ok(2);
     };
     let mut wait = false;
+    let mut typed = false;
     let mut until = Vec::new();
     let mut timeout_ms = None;
     let mut index = 2;
@@ -793,6 +794,10 @@ fn agent_prompt(args: &[String]) -> std::io::Result<i32> {
         match args[index].as_str() {
             "--wait" => {
                 wait = true;
+                index += 1;
+            }
+            "--typed" => {
+                typed = true;
                 index += 1;
             }
             "--until" => {
@@ -838,6 +843,7 @@ fn agent_prompt(args: &[String]) -> std::io::Result<i32> {
     let response = super::send_request(&Request {
         id: "cli:agent:prompt".into(),
         method: Method::AgentPrompt(AgentPromptParams {
+            typed,
             target: target.clone(),
             text: text.clone(),
             wait: wait.then_some(AgentPromptWaitOptions {

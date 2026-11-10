@@ -247,8 +247,11 @@ impl App {
                 return Err(encode_error(id, "agent_prompt_failed", err.to_string()));
             }
         }
-        let (text, enter) =
-            crate::app::api_helpers::encode_api_submission_parts(runtime, &params.text);
+        let (text, enter) = if params.typed {
+            crate::app::api_helpers::encode_typed_submission_parts(runtime, &params.text)
+        } else {
+            crate::app::api_helpers::encode_api_submission_parts(runtime, &params.text)
+        };
         #[cfg(windows)]
         let text = if expected_agent == crate::detect::Agent::Codex {
             let mut text = text;
@@ -518,6 +521,7 @@ mod tests {
             &mut app,
             "req",
             AgentPromptParams {
+                typed: false,
                 target: "reviewer".into(),
                 text: "A != B".into(),
                 wait: None,
@@ -618,6 +622,7 @@ mod tests {
             &mut app,
             "req",
             AgentPromptParams {
+                typed: false,
                 target: public_pane_id,
                 text: "A != B".into(),
                 wait: None,
@@ -647,6 +652,7 @@ mod tests {
             &mut app,
             "req-raw",
             AgentPromptParams {
+                typed: false,
                 target: "reviewer".into(),
                 text: "A != B".into(),
                 wait: None,
@@ -662,6 +668,7 @@ mod tests {
             &mut app,
             "req-label",
             AgentPromptParams {
+                typed: false,
                 target: "opencode".into(),
                 text: "wrong target".into(),
                 wait: None,
@@ -670,6 +677,56 @@ mod tests {
         let error: crate::api::schema::ErrorResponse = serde_json::from_str(&rejected).unwrap();
         assert_eq!(error.error.code, "agent_not_found");
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn typed_agent_prompt_writes_text_without_bracketed_paste() {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_agent_name("head".into());
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        let (runtime, mut rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                80, 24, 0, b"", 2,
+            );
+        runtime.test_process_pty_bytes(b"\x1b[?2004h");
+        app.state.insert_test_runtime(pane_id, runtime);
+
+        let typed = run_deferred_agent_prompt(
+            &mut app,
+            "req-typed",
+            AgentPromptParams {
+                target: "head".into(),
+                text: "/not a command\r\nsecond line".into(),
+                wait: None,
+                typed: true,
+            },
+        );
+        let typed: SuccessResponse = serde_json::from_str(&typed).unwrap();
+        assert!(matches!(typed.result, ResponseResult::AgentPrompted { .. }));
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            Bytes::from_static(b" /not a command\nsecond line")
+        );
+        assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"\r"));
+
+        let pasted = run_deferred_agent_prompt(
+            &mut app,
+            "req-pasted",
+            AgentPromptParams {
+                target: "head".into(),
+                text: "A".into(),
+                wait: None,
+                typed: false,
+            },
+        );
+        let pasted: SuccessResponse = serde_json::from_str(&pasted).unwrap();
+        assert!(matches!(pasted.result, ResponseResult::AgentPrompted { .. }));
+        assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"\x1b[200~A\x1b[201~"));
     }
 
     #[tokio::test]
@@ -690,6 +747,7 @@ mod tests {
             &mut app,
             "req",
             AgentPromptParams {
+                typed: false,
                 target: "reviewer".into(),
                 text: "hello".into(),
                 wait: None,
@@ -724,6 +782,7 @@ mod tests {
                 &mut app,
                 "req",
                 AgentPromptParams {
+                    typed: false,
                     target: target.into(),
                     text: text.into(),
                     wait: None,
@@ -757,6 +816,7 @@ mod tests {
             &mut app,
             "req",
             AgentPromptParams {
+                typed: false,
                 target: "reviewer".into(),
                 text: "unrelated prompt".into(),
                 wait: None,
@@ -797,6 +857,7 @@ mod tests {
             &mut app,
             "req",
             AgentPromptParams {
+                typed: false,
                 target: "reviewer".into(),
                 text: "A != B".into(),
                 wait: None,
@@ -876,6 +937,7 @@ mod tests {
             &mut app,
             "req-pending",
             AgentPromptParams {
+                typed: false,
                 target: "reviewer".into(),
                 text: "A != B".into(),
                 wait: None,

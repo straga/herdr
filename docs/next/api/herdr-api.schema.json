@@ -1236,6 +1236,10 @@
             "text": {
               "type": "string"
             },
+            "typed": {
+              "description": "Write the text as typed input, without bracketed-paste markers. An agent that treats\npasted text as material rather than the user's own words then reads it as typed.",
+              "type": "boolean"
+            },
             "wait": {
               "anyOf": [
                 {
