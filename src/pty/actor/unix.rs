@@ -18,6 +18,48 @@ use crate::pty::fd;
 const ACTOR_IDLE_POLL_MS: i32 = 1000;
 const ACTOR_COMMAND_BUFFER: usize = 1024;
 const HANDOFF_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+// Claude Code takes one read of more than 800 characters for a paste, and a macOS pty hands the
+// reader up to ~1 KiB at a time. A piece of 400 bytes stays under 800 characters whatever the
+// script, and two of them coalesced into one read still do.
+const TYPED_PIECE_BYTES: usize = 400;
+const TYPED_DRAIN_POLL: Duration = Duration::from_millis(5);
+// A program that has not taken a piece in this long, or a piece the pty would not accept in this
+// long, ends the submission with an error: writing on would pile unread input past the paste
+// length, and Enter after unread text would submit a fragment.
+const TYPED_DRAIN_CEILING: Duration = Duration::from_secs(2);
+// Where the master cannot tell how much input is unread, pieces go out at this pace instead.
+#[cfg(not(target_os = "macos"))]
+const TYPED_PIECE_PAUSE: Duration = Duration::from_millis(30);
+
+/// Cuts `text` into pieces of at most `max` bytes, never inside a UTF-8 character.
+fn split_typed_pieces(text: Bytes, max: usize) -> VecDeque<Bytes> {
+    let mut pieces = VecDeque::new();
+    let mut start = 0;
+    while start < text.len() {
+        let mut end = (start + max).min(text.len());
+        while end > start + 1 && end < text.len() && (text[end] & 0b1100_0000) == 0b1000_0000 {
+            end -= 1;
+        }
+        pieces.push_back(text.slice(start..end));
+        start = end;
+    }
+    pieces
+}
+
+/// Has the program read the input written so far? On macOS FIONREAD on the master answers with
+/// the bytes still waiting in the slave's input queue.
+#[cfg(target_os = "macos")]
+fn typed_piece_taken(file: &std::fs::File, since: Instant) -> bool {
+    match fd::pending_input(file.as_raw_fd()) {
+        Ok(pending) => pending == 0,
+        Err(_) => since.elapsed() >= TYPED_DRAIN_POLL,
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn typed_piece_taken(_file: &std::fs::File, since: Instant) -> bool {
+    since.elapsed() >= TYPED_PIECE_PAUSE
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ActorState {
@@ -75,6 +117,12 @@ enum PtyIoDataCommand {
     WriteUserInput(Bytes),
     SubmitUserInput {
         text: Bytes,
+        /// Text still to write after `text`, a piece at a time once the program has read the
+        /// one before.
+        pieces: VecDeque<Bytes>,
+        /// Written as typing: every piece, and Enter, waits until the program has read the piece
+        /// before it, and the whole submission is bounded by `TYPED_DRAIN_CEILING` per step.
+        typed: bool,
         enter: Bytes,
         delay: Duration,
         reply: std_mpsc::Sender<std::io::Result<()>>,
@@ -151,6 +199,17 @@ impl PtyIoActorHandle {
         enter: Bytes,
         delay: Duration,
     ) -> std::io::Result<std_mpsc::Receiver<std::io::Result<()>>> {
+        self.send_submission(text, VecDeque::new(), false, enter, delay)
+    }
+
+    fn send_submission(
+        &self,
+        text: Bytes,
+        pieces: VecDeque<Bytes>,
+        typed: bool,
+        enter: Bytes,
+        delay: Duration,
+    ) -> std::io::Result<std_mpsc::Receiver<std::io::Result<()>>> {
         let user_writes = self
             .user_writes
             .lock()
@@ -165,6 +224,8 @@ impl PtyIoActorHandle {
         self.data_tx
             .try_send(PtyIoDataCommand::SubmitUserInput {
                 text,
+                pieces,
+                typed,
                 enter,
                 delay,
                 reply: reply_tx,
@@ -179,6 +240,19 @@ impl PtyIoActorHandle {
             })?;
         self.wake_actor();
         Ok(reply_rx)
+    }
+
+    /// A submission written as typing: the text goes to the pty in small pieces, so that no
+    /// single read of the program reaches the length it takes for a paste.
+    pub(crate) fn queue_typed_input_submission(
+        &self,
+        text: Bytes,
+        enter: Bytes,
+        delay: Duration,
+    ) -> std::io::Result<std_mpsc::Receiver<std::io::Result<()>>> {
+        let mut pieces = split_typed_pieces(text, TYPED_PIECE_BYTES);
+        let first = pieces.pop_front().unwrap_or_default();
+        self.send_submission(first, pieces, true, enter, delay)
     }
 
     pub(crate) fn write_terminal_response(&self, response: impl FnOnce() -> Option<Bytes>) {
@@ -466,6 +540,10 @@ struct PtyIoActorRunner {
 }
 
 struct ActiveSubmission {
+    pieces: VecDeque<Bytes>,
+    typed: bool,
+    /// When the piece now being written was queued; only a typed submission bounds it.
+    piece_since: Instant,
     enter: Bytes,
     delay: Duration,
     phase: SubmissionPhase,
@@ -486,6 +564,8 @@ enum SubmissionBoundary {
 
 enum SubmissionPhase {
     WritingText,
+    /// A piece is written; the next waits until the program has read it.
+    WaitingForRead(Instant),
     WaitingUntil(Instant),
     WritingEnter,
 }
@@ -650,6 +730,8 @@ impl PtyIoActorRunner {
             }
             PtyIoDataCommand::SubmitUserInput {
                 text,
+                pieces,
+                typed,
                 enter,
                 delay,
                 reply,
@@ -662,6 +744,9 @@ impl PtyIoActorRunner {
                         SubmissionPhase::WritingText
                     };
                     self.active_submission = Some(ActiveSubmission {
+                        pieces,
+                        typed,
+                        piece_since: Instant::now(),
                         enter,
                         delay,
                         phase,
@@ -871,7 +956,11 @@ impl PtyIoActorRunner {
                     return;
                 };
                 debug_assert!(matches!(submission.phase, SubmissionPhase::WritingText));
-                submission.phase = SubmissionPhase::WaitingUntil(Instant::now() + submission.delay);
+                submission.phase = if submission.typed {
+                    SubmissionPhase::WaitingForRead(Instant::now())
+                } else {
+                    SubmissionPhase::WaitingUntil(Instant::now() + submission.delay)
+                };
             }
             SubmissionBoundary::Enter => {
                 let Some(submission) = self.active_submission.take() else {
@@ -884,6 +973,7 @@ impl PtyIoActorRunner {
     }
 
     fn schedule_submission_enter(&mut self) {
+        self.schedule_next_typed_piece();
         let Some(ActiveSubmission {
             enter,
             phase: SubmissionPhase::WaitingUntil(deadline),
@@ -904,7 +994,85 @@ impl PtyIoActorRunner {
         }
     }
 
+    /// Moves a typed submission on: the next piece, or the wait before Enter, once the program
+    /// has read what was written; an error when a step outlives `TYPED_DRAIN_CEILING`.
+    fn schedule_next_typed_piece(&mut self) {
+        enum Step {
+            Wait,
+            Fail(&'static str),
+            Piece(Bytes),
+            Enter,
+        }
+        let step = {
+            let Some(submission) = self.active_submission.as_mut() else {
+                return;
+            };
+            if !submission.typed {
+                return;
+            }
+            match submission.phase {
+                SubmissionPhase::WritingText
+                    if submission.piece_since.elapsed() >= TYPED_DRAIN_CEILING =>
+                {
+                    Step::Fail("the pty did not take a typed piece in time")
+                }
+                SubmissionPhase::WaitingForRead(since) => {
+                    if typed_piece_taken(&self.file, since) {
+                        match submission.pieces.pop_front() {
+                            Some(piece) => Step::Piece(piece),
+                            None => Step::Enter,
+                        }
+                    } else if since.elapsed() >= TYPED_DRAIN_CEILING {
+                        Step::Fail("the program did not read typed input in time")
+                    } else {
+                        Step::Wait
+                    }
+                }
+                _ => Step::Wait,
+            }
+        };
+        match step {
+            Step::Wait => {}
+            Step::Fail(why) => self.fail_typed_submission(why),
+            Step::Piece(piece) => {
+                let submission = self.active_submission.as_mut().unwrap();
+                submission.phase = SubmissionPhase::WritingText;
+                submission.piece_since = Instant::now();
+                self.enqueue_submission_write(piece, SubmissionBoundary::Text);
+            }
+            Step::Enter => {
+                let submission = self.active_submission.as_mut().unwrap();
+                submission.phase = SubmissionPhase::WaitingUntil(Instant::now() + submission.delay);
+            }
+        }
+    }
+
+    /// Ends a typed submission with `TimedOut`: the piece still queued is dropped, Enter never goes.
+    /// What the program has not read stays in its input; the caller learns the text did not arrive.
+    fn fail_typed_submission(&mut self, why: &str) {
+        warn!(pane = self.pane_id, "{why}; typed submission failed");
+        if let Some(index) = self
+            .pending_writes
+            .iter()
+            .position(|write| write.boundary == Some(SubmissionBoundary::Text))
+        {
+            if index == 0 {
+                self.current_write_offset = 0;
+            }
+            self.pending_writes.remove(index);
+        }
+        self.fail_active_submission(std::io::Error::new(std::io::ErrorKind::TimedOut, why));
+    }
+
     fn poll_timeout_ms(&self) -> i32 {
+        if let Some(ActiveSubmission {
+            typed: true,
+            phase: SubmissionPhase::WaitingForRead(_) | SubmissionPhase::WritingText,
+            ..
+        }) = self.active_submission.as_ref()
+        {
+            return TYPED_DRAIN_POLL.as_millis() as i32;
+        }
         let Some(ActiveSubmission {
             phase: SubmissionPhase::WaitingUntil(deadline),
             ..
@@ -1874,5 +2042,180 @@ mod tests {
 
         let _ = peer.write_all(b"ignored");
         assert!(read_rx.recv_timeout(Duration::from_millis(150)).is_err());
+    }
+
+    /// A real pty: the reader on the slave side sees the reads a program would see.
+    fn actor_with_pty() -> (PtyIoActorHandle, std::fs::File) {
+        let mut master = -1;
+        let mut slave = -1;
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            },
+            0
+        );
+        let slave = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(slave) });
+        let mut termios = std::mem::MaybeUninit::<libc::termios>::uninit();
+        assert_eq!(
+            unsafe { libc::tcgetattr(slave.as_raw_fd(), termios.as_mut_ptr()) },
+            0
+        );
+        let mut termios = unsafe { termios.assume_init() };
+        unsafe { libc::cfmakeraw(&mut termios) };
+        assert_eq!(
+            unsafe { libc::tcsetattr(slave.as_raw_fd(), libc::TCSANOW, &termios) },
+            0
+        );
+        fd::set_nonblocking(master).expect("master nonblocking");
+        let config = PtyIoActorConfig {
+            pane_id: 1,
+            master_fd: unsafe { OwnedFd::from_raw_fd(master) },
+            initially_quiesced: false,
+            on_read: Box::new(|_| PtyReadResult::empty()),
+            on_reader_exit: None,
+        };
+        (PtyIoActor::spawn(config).expect("actor spawn"), slave)
+    }
+
+    /// Reads the slave like a busy program: a pause before every read, so the writer has time
+    /// to run ahead. Returns the size of each read and everything read, until `until` arrives.
+    fn read_slowly(mut slave: std::fs::File, until: u8) -> (Vec<usize>, Vec<u8>) {
+        let mut sizes = Vec::new();
+        let mut received = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !received.ends_with(&[until]) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(30));
+            let mut poll = libc::pollfd {
+                fd: slave.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            if unsafe { libc::poll(&mut poll, 1, 500) } != 1 {
+                continue;
+            }
+            let mut buf = vec![0; 8192];
+            let n = slave.read(&mut buf).expect("slave read");
+            sizes.push(n);
+            received.extend_from_slice(&buf[..n]);
+        }
+        (sizes, received)
+    }
+
+    /// Long ASCII lines, the shape that crosses the paste length in one read, plus multibyte
+    /// characters, so a piece boundary can fall inside one.
+    fn typed_probe_text() -> String {
+        let mut text = String::from("PROBE-START. Typed delivery probe — ünïcödé, αβγ, ✓.\n");
+        for i in 1..=22 {
+            text.push_str(&format!(
+                "{i}. /home/user/projects/example/docs/plans/section_{i}/{i}_a_long_path_name_for_a_typed_delivery_probe_file.md\n"
+            ));
+        }
+        text.push_str("PROBE-END. Both marks — start and end — are in place ✓.\n");
+        text
+    }
+
+    #[test]
+    fn typed_submission_reaches_a_busy_reader_in_reads_shorter_than_a_paste() {
+        let (handle, slave) = actor_with_pty();
+        let text = typed_probe_text();
+        assert!(text.len() > 2000);
+        let reader = std::thread::spawn(move || read_slowly(slave, b'\r'));
+
+        let completion = handle
+            .queue_typed_input_submission(
+                Bytes::from(text.clone()),
+                Bytes::from_static(b"\r"),
+                Duration::from_millis(50),
+            )
+            .expect("typed submission queues");
+        completion
+            .recv_timeout(Duration::from_secs(20))
+            .expect("actor reports typed submission")
+            .expect("typed submission completes");
+        let (sizes, received) = reader.join().expect("reader joins");
+
+        let mut want = text.into_bytes();
+        want.push(b'\r');
+        assert_eq!(received, want, "the text arrives whole and in order");
+        assert!(
+            sizes.iter().all(|&n| n <= TYPED_PIECE_BYTES),
+            "every read stays at or under {TYPED_PIECE_BYTES} bytes, got {sizes:?}"
+        );
+        handle.shutdown();
+    }
+
+    #[test]
+    fn typed_submission_to_a_program_that_does_not_read_fails_without_enter() {
+        let (handle, mut slave) = actor_with_pty();
+        let text = typed_probe_text();
+
+        let completion = handle
+            .queue_typed_input_submission(
+                Bytes::from(text.clone()),
+                Bytes::from_static(b"\r"),
+                Duration::from_millis(50),
+            )
+            .expect("typed submission queues");
+        let outcome = completion
+            .recv_timeout(TYPED_DRAIN_CEILING * 4)
+            .expect("a typed submission nobody reads ends within its ceiling");
+        let err = outcome.expect_err("unread typed input is an error, not a delivery");
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+
+        handle
+            .try_write_user_input(Bytes::from_static(b"later"))
+            .expect("the actor still takes input after the failed submission");
+        std::thread::sleep(Duration::from_millis(200));
+        let mut buf = vec![0; 8192];
+        let n = slave.read(&mut buf).expect("slave read");
+        let unread = &buf[..n];
+        assert!(
+            unread.len() <= TYPED_PIECE_BYTES + b"later".len(),
+            "no more than one piece waits unread, got {} bytes",
+            unread.len()
+        );
+        assert!(unread.ends_with(b"later"), "the actor kept writing input");
+        assert!(!unread.contains(&b'\r'), "Enter did not go after unread text");
+        handle.shutdown();
+    }
+
+    #[test]
+    fn typed_submission_of_empty_text_sends_only_enter() {
+        let (handle, slave) = actor_with_pty();
+        let reader = std::thread::spawn(move || read_slowly(slave, b'\r'));
+
+        handle
+            .queue_typed_input_submission(Bytes::new(), Bytes::from_static(b"\r"), Duration::ZERO)
+            .expect("empty typed submission queues")
+            .recv_timeout(Duration::from_secs(5))
+            .expect("actor reports empty typed submission")
+            .expect("empty typed submission completes");
+        let (_, received) = reader.join().expect("reader joins");
+
+        assert_eq!(received, b"\r");
+        handle.shutdown();
+    }
+
+    #[test]
+    fn typed_pieces_keep_characters_whole_and_add_up_to_the_text() {
+        let text = typed_probe_text();
+        let pieces = split_typed_pieces(Bytes::from(text.clone()), TYPED_PIECE_BYTES);
+
+        assert!(pieces.len() > 1);
+        assert!(pieces.iter().all(|piece| piece.len() <= TYPED_PIECE_BYTES));
+        assert!(pieces.iter().all(|piece| std::str::from_utf8(piece).is_ok()));
+        let joined: Vec<u8> = pieces.iter().flat_map(|piece| piece.iter().copied()).collect();
+        assert_eq!(joined, text.into_bytes());
+    }
+
+    #[test]
+    fn typed_pieces_of_empty_text_are_none() {
+        assert!(split_typed_pieces(Bytes::new(), TYPED_PIECE_BYTES).is_empty());
     }
 }

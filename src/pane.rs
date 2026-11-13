@@ -1660,20 +1660,28 @@ impl PaneRuntimeIo {
         enter: Bytes,
         delay: std::time::Duration,
         deadline: Option<std::time::Instant>,
+        typed: bool,
     ) -> std::io::Result<std::sync::mpsc::Receiver<std::io::Result<()>>> {
         match self {
             PaneRuntimeIo::Actor(actor) => {
                 #[cfg(windows)]
-                return actor.queue_user_input_submission(text, enter, delay, deadline);
+                {
+                    let _ = typed;
+                    return actor.queue_user_input_submission(text, enter, delay, deadline);
+                }
                 #[cfg(unix)]
                 {
                     let _ = deadline;
-                    actor.queue_user_input_submission(text, enter, delay)
+                    if typed {
+                        actor.queue_typed_input_submission(text, enter, delay)
+                    } else {
+                        actor.queue_user_input_submission(text, enter, delay)
+                    }
                 }
             }
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { sender, .. } => {
-                let _ = deadline;
+                let _ = (deadline, typed);
                 let sender = sender.clone();
                 let (reply_tx, reply_rx) = std::sync::mpsc::channel();
                 std::thread::spawn(move || {
@@ -3695,9 +3703,10 @@ impl PaneRuntime {
         enter: Bytes,
         delay: std::time::Duration,
         deadline: Option<std::time::Instant>,
+        typed: bool,
     ) -> std::io::Result<std::sync::mpsc::Receiver<std::io::Result<()>>> {
         self.io
-            .queue_user_input_submission(text, enter, delay, deadline)
+            .queue_user_input_submission(text, enter, delay, deadline, typed)
     }
 
     pub fn try_send_paste(&self, text: String) -> Result<(), mpsc::error::TrySendError<Bytes>> {

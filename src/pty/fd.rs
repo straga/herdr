@@ -125,6 +125,17 @@ pub(crate) fn drain_wake_fd(fd: RawFd) -> std::io::Result<()> {
     }
 }
 
+/// Bytes waiting in the slave's input queue, asked on the master: on macOS FIONREAD on a pty
+/// master answers with the input the program has not read yet (on Linux it means something else).
+#[cfg(target_os = "macos")]
+pub(crate) fn pending_input(master_fd: RawFd) -> std::io::Result<usize> {
+    let mut pending: libc::c_int = 0;
+    if unsafe { libc::ioctl(master_fd, libc::FIONREAD, &mut pending) } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(pending.max(0) as usize)
+}
+
 #[cfg(unix)]
 #[derive(Default)]
 pub(crate) struct PtyWakeReadiness {
