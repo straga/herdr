@@ -1045,13 +1045,26 @@ pub(super) fn url_from_link_target(target: crate::ghostty::LinkTarget) -> Option
     match target {
         crate::ghostty::LinkTarget::Uri(uri) => Some(uri),
         crate::ghostty::LinkTarget::Text { text, clicked_byte } => {
-            url_at_byte(&text, clicked_byte).map(str::to_owned)
+            if let Some(url) = url_at_byte(&text, clicked_byte) {
+                return Some(url.to_owned());
+            }
+            markdown_link_at_byte(&text, clicked_byte).map(|link| link.url)
         }
     }
 }
 
 pub(crate) fn safe_web_url(url: &str) -> Option<&str> {
     (url.starts_with("http://") || url.starts_with("https://")).then_some(url)
+}
+
+/// A URL herdr acts on: http(s) as before, plus `file://` links to Markdown documents,
+/// which the Blueprint plugin routes to its viewer.
+pub(crate) fn openable_link_uri(uri: &str) -> Option<&str> {
+    if safe_web_url(uri).is_some() {
+        return Some(uri);
+    }
+    let path = uri.strip_prefix("file://")?;
+    (path.ends_with(".md") || path.ends_with(".markdown")).then_some(uri)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1098,11 +1111,16 @@ pub(crate) fn word_bounds_at_column(row: &str, col: u16) -> Option<(u16, u16)> {
 }
 
 fn url_at_byte(text: &str, clicked_byte: usize) -> Option<&str> {
-    let range = url_byte_range(text, clicked_byte)?;
+    let range = http_url_byte_range(text, clicked_byte)?;
     text.get(range)
 }
 
 pub(super) fn url_byte_range(text: &str, clicked_byte: usize) -> Option<std::ops::Range<usize>> {
+    http_url_byte_range(text, clicked_byte)
+        .or_else(|| markdown_link_at_byte(text, clicked_byte).map(|link| link.range))
+}
+
+fn http_url_byte_range(text: &str, clicked_byte: usize) -> Option<std::ops::Range<usize>> {
     let clicked_idx = text.get(..clicked_byte)?.chars().count();
     let cells = text_cells(text);
     let span = url_span_at_column(&cells, clicked_idx)?;
@@ -1110,6 +1128,77 @@ pub(super) fn url_byte_range(text: &str, clicked_byte: usize) -> Option<std::ops
     let end = byte_index_after_cell(text, span.end);
     safe_web_url(text.get(start..end)?)?;
     Some(start..end)
+}
+
+/// A Markdown document clicked as plain text: the path's byte range in `text` and its `file://` URL.
+struct MarkdownLink {
+    range: std::ops::Range<usize>,
+    url: String,
+}
+
+fn markdown_link_at_byte(text: &str, clicked_byte: usize) -> Option<MarkdownLink> {
+    let (word_range, word) = word_at_byte(text, clicked_byte)?;
+    let (path_range, path) = unwrap_path_word(word_range, word);
+    let url = markdown_file_url(path)?;
+    Some(MarkdownLink { range: path_range, url })
+}
+
+/// The whitespace-delimited word containing `clicked_byte`, with its byte range.
+fn word_at_byte(text: &str, clicked_byte: usize) -> Option<(std::ops::Range<usize>, &str)> {
+    let mut word_start = 0usize;
+    let mut in_word = false;
+    for (idx, ch) in text.char_indices() {
+        if ch.is_whitespace() {
+            if in_word {
+                if clicked_byte >= word_start && clicked_byte < idx {
+                    return Some((word_start..idx, &text[word_start..idx]));
+                }
+                in_word = false;
+            }
+            word_start = idx + ch.len_utf8();
+        } else {
+            in_word = true;
+        }
+    }
+    (in_word && clicked_byte >= word_start).then(|| (word_start..text.len(), &text[word_start..]))
+}
+
+/// The path inside a word: heads write paths as `` `path` ``, so matching wrapping quotes are
+/// stripped; otherwise trailing sentence punctuation, mirroring `trim_url_edges` for http URLs.
+fn unwrap_path_word(range: std::ops::Range<usize>, word: &str) -> (std::ops::Range<usize>, &str) {
+    let Some(first) = word.chars().next() else {
+        return (range, word);
+    };
+    if matches!(first, '"' | '\'' | '`') && word.len() > first.len_utf8() && word.ends_with(first) {
+        let inner = &word[first.len_utf8()..word.len() - first.len_utf8()];
+        return (
+            range.start + first.len_utf8()..range.end - first.len_utf8(),
+            inner,
+        );
+    }
+    let trimmed = word.trim_end_matches(['.', ',', ';', ':', '!', '?']);
+    if !trimmed.is_empty() && trimmed.len() < word.len() {
+        return (range.start..range.start + trimmed.len(), trimmed);
+    }
+    (range, word)
+}
+
+/// The `file://` URL for an absolute or home-relative `.md` path; anything else is not a link.
+/// `.markdown` files reach the plugin only as explicit `file://` URIs, per the stage boundary.
+fn markdown_file_url(path: &str) -> Option<String> {
+    if !path.ends_with(".md") {
+        return None;
+    }
+    if path.starts_with('/') {
+        return Some(format!("file://{path}"));
+    }
+    if path.starts_with("~/") {
+        return Some(format!(
+            "file://{}",
+            crate::worktree::expand_tilde_path(path).to_string_lossy()
+        ));
+    }
+    None
 }
 
 fn token_span_at_column(cells: &[TextCell], clicked_idx: usize) -> Option<CellSpan> {
@@ -2565,6 +2654,78 @@ mod tests {
             None
         );
         assert_eq!(selected_url("open file:///tmp/report", "file"), None);
+    }
+
+    fn text_target(row: &str, click: &str) -> crate::ghostty::LinkTarget {
+        crate::ghostty::LinkTarget::Text {
+            text: row.to_string(),
+            clicked_byte: row.find(click).unwrap(),
+        }
+    }
+
+    #[test]
+    fn markdown_path_click_resolves_file_url() {
+        assert_eq!(
+            url_from_link_target(text_target("see /tmp/docs/plan.md here", "docs")).as_deref(),
+            Some("file:///tmp/docs/plan.md")
+        );
+    }
+
+    #[test]
+    fn home_relative_markdown_path_expands_to_file_url() {
+        let Ok(home) = std::env::var("HOME") else {
+            return;
+        };
+        assert_eq!(
+            url_from_link_target(text_target("open ~/notes/x.md now", "notes")).as_deref(),
+            Some(format!("file://{home}/notes/x.md").as_str())
+        );
+    }
+
+    #[test]
+    fn markdown_path_in_backticks_excludes_the_quotes() {
+        assert_eq!(
+            url_from_link_target(text_target("`/tmp/x.md`", "x.md")).as_deref(),
+            Some("file:///tmp/x.md")
+        );
+    }
+
+    #[test]
+    fn openable_link_uri_accepts_web_and_markdown_file_urls() {
+        assert_eq!(
+            openable_link_uri("https://example.com/a"),
+            Some("https://example.com/a")
+        );
+        assert_eq!(
+            openable_link_uri("http://example.com/a"),
+            Some("http://example.com/a")
+        );
+        assert_eq!(
+            openable_link_uri("file:///tmp/x.md"),
+            Some("file:///tmp/x.md")
+        );
+        assert_eq!(
+            openable_link_uri("file:///tmp/x.markdown"),
+            Some("file:///tmp/x.markdown")
+        );
+        assert_eq!(openable_link_uri("file:///tmp/x.txt"), None);
+        assert_eq!(openable_link_uri("mailto:a@b.c"), None);
+    }
+
+    #[test]
+    fn non_markdown_paths_and_relative_words_open_nothing() {
+        assert_eq!(
+            url_from_link_target(text_target("open file.txt now", "file")).as_deref(),
+            None
+        );
+        assert_eq!(
+            url_from_link_target(text_target("docs.md", "docs")).as_deref(),
+            None
+        );
+        assert_eq!(
+            url_from_link_target(text_target("see /tmp/x.markdown here", "x")).as_deref(),
+            None
+        );
     }
 
     #[test]
